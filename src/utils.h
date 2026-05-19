@@ -20,6 +20,13 @@
 #define I2S_BCLK 26
 #define I2S_DIN 16
 
+#define ADC1_CHANNEL 6
+#define ADC_PIN 34
+
+#define BUTTON_SELECT_PIN 27
+#define BUTTON_UP 14
+#define BUTTON_DOWN 15
+
 extern Audio audio;
 extern LiquidCrystal_I2C lcd;
 
