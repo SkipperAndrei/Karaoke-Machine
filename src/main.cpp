@@ -1,14 +1,36 @@
 #include "utils.h"
 
-QueueHandle_t playPauseQueue;
-QueueHandle_t volumeQueue;
+// ============================================================================
+// SYSTEM DEFINITIONS & STATES
+// ============================================================================
+enum PlayerState {
+  STATE_MENU,
+  STATE_PLAYING
+};
 
+volatile PlayerState systemState = STATE_MENU; 
+bool isPlaying = false; 
 
-
+// Core Hardware Interfaces
 Audio audio;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-bool isPlaying = true; 
+// FreeRTOS Communication Queues
+QueueHandle_t playPauseQueue;
+QueueHandle_t volumeQueue;
+QueueHandle_t changeTrackQueue;
+
+// Global tracking variables for resetting the lyric engine across threads
+volatile bool resetLyricsFlag = false;
+
+// ============================================================================
+// TRACK & LYRIC LOGISTICS STORAGE
+// ============================================================================
+#define MAX_SONGS 30
+String songList[MAX_SONGS];
+int totalSongs = 0;
+int highlightedIndex = 0;   
+int currentTrackIndex = 0;  
 
 #define MAX_LYRICS 250
 struct LyricLine {
@@ -19,14 +41,43 @@ struct LyricLine {
 LyricLine currentLyrics[MAX_LYRICS];
 int lyricCount = 0;
 
-void parseLRC(const char* path)
-{
+void updateMenuLCD();
+
+// ============================================================================
+// DYNAMIC FILE PARSERS & SCANNERS
+// ============================================================================
+void scanSDForSongs() {
+  File root = SD.open("/");
+  totalSongs = 0;
+
+  if (!root) {
+    Serial.println("Failed to open root directory");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file && totalSongs < MAX_SONGS) {
+    if (!file.isDirectory()) {
+      String fileName = String(file.name());
+      if (fileName.endsWith(".mp3") || fileName.endsWith(".MP3")) {
+        songList[totalSongs] = fileName;
+        totalSongs++;
+      }
+    }
+    file = root.openNextFile();
+  }
+  root.close();
+  Serial.printf("SD Scanner: Automatically loaded %d MP3 files.\n", totalSongs);
+}
+
+void parseLRC(const char* path) {
     lyricCount = 0;
     int32_t offsetMs = 0;
 
     File file = SD.open(path);
     if (!file) {
         Serial.println("LRC file not found!");
+        for(int i=0; i<MAX_LYRICS; i++) currentLyrics[i] = {0, ""};
         return;
     }
 
@@ -88,71 +139,33 @@ void parseLRC(const char* path)
     Serial.printf("LRC Parser: Loaded %d lines, offset %d ms.\n", lyricCount, offsetMs);
 }
 
-
-void audio_task(void *pvParameters) {
-  bool shouldPlay = true;
-  int targetVolume = 35;
-
-  for (;;) {
-    if (shouldPlay) {
-      audio.loop();
-    }
-
-    if (xQueueReceive(playPauseQueue, &shouldPlay, 0) == pdTRUE) {
-      audio.pauseResume();
-    }
-
-    if (xQueueReceive(volumeQueue, &targetVolume, 0) == pdTRUE) {
-      audio.setVolume(targetVolume);
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(2));
-  }
-}
-
-
-
-void ui_task(void *pvParameters) {
-  pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
+// ============================================================================
+// LCD MENU ENGINE
+// ============================================================================
+void updateMenuLCD() {
+  lcd.clear();
+  int startRow = (highlightedIndex / 4) * 4; 
   
-  bool stableButtonState = HIGH;
-  int lastVolume = -1;
+  for (int i = 0; i < 4; i++) {
+    int songIdx = startRow + i;
+    if (songIdx >= totalSongs) break;
 
-  for (;;) {
-    bool rawButtonState = digitalRead(BUTTON_SELECT_PIN);
-    
-    if (rawButtonState != stableButtonState) {
-      vTaskDelay(pdMS_TO_TICKS(50)); 
-      
-      if (digitalRead(BUTTON_SELECT_PIN) == rawButtonState) {
-        stableButtonState = rawButtonState;
-        
-        if (stableButtonState == LOW) {
-          isPlaying = !isPlaying;
-          xQueueOverwrite(playPauseQueue, &isPlaying);
-        }
-      }
+    lcd.setCursor(0, i);
+    if (songIdx == highlightedIndex) {
+      lcd.print(">"); 
+    } else {
+      lcd.print(" ");
     }
-
-    uint32_t raw_volume = analogRead(ADC_PIN); 
-    float x = raw_volume / 4095.0f;
-    int32_t mapped_volume = (int32_t)(x * 21.0f);
     
-    if (abs(mapped_volume - lastVolume) >= 2) {
-      xQueueOverwrite(volumeQueue, &mapped_volume);
-      lastVolume = mapped_volume;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(20));
+    lcd.print(songList[songIdx].substring(0, 19));
   }
 }
 
-void printWrappedToLCD(const char* text, int startRow)
-{
+void printWrappedToLCD(const char* text, int startRow) {
     static const int COLS = 20;
     static const int ROWS = 4;
 
-    char        buf[COLS + 1];
+    char buf[COLS + 1];
     const char* p = text;
 
     for (int row = 0; row < ROWS; row++) {
@@ -176,7 +189,6 @@ void printWrappedToLCD(const char* text, int startRow)
             len++;
         }
 
-
         if (*p != '\0' && *p != ' ' && lastSpace != nullptr) {
             len = (int)(lastSpace - lineStart);
             p   = lastSpace + 1;
@@ -192,11 +204,136 @@ void printWrappedToLCD(const char* text, int startRow)
     }
 }
 
-void lyric_task(void* pvParameters)
-{
+// ============================================================================
+// FREERTOS KERNEL TASKS
+// ============================================================================
+void audio_task(void *pvParameters) {
+  bool shouldPlay = false;
+  int targetVolume = 5;
+  int nextTrackIdx = 0;
+
+  for (;;) {
+    if (xQueueReceive(changeTrackQueue, &nextTrackIdx, 0) == pdTRUE) {
+      audio.stopSong();
+      
+      String newLrc = "/" + songList[nextTrackIdx];
+      newLrc.replace(".mp3", ".lrc");
+      parseLRC(newLrc.c_str());
+      
+      audio.connecttoFS(SD, ("/" + songList[nextTrackIdx]).c_str());
+      shouldPlay = true;
+    }
+
+    if (xQueueReceive(playPauseQueue, &shouldPlay, 0) == pdTRUE) {
+      audio.pauseResume();
+    }
+
+    if (shouldPlay) {
+      audio.loop();
+    }
+
+    if (xQueueReceive(volumeQueue, &targetVolume, 0) == pdTRUE) {
+      audio.setVolume(targetVolume);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+void ui_task(void *pvParameters) {
+  // Pin assignments from utils.h are safely read here
+  pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_NEXT_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_PREV_PIN, INPUT_PULLUP);
+  
+  bool stableSelectState = HIGH;
+  bool stableNextState = HIGH;
+  bool stablePrevState = HIGH;
+  int lastVolume = -1;
+  
+  uint32_t adcThrottleCounter = 0; // Fixed: Throttles down the performance-heavy analogRead loops
+
+  updateMenuLCD();
+
+  for (;;) {
+    bool rawSelect = digitalRead(BUTTON_SELECT_PIN);
+    bool rawNext = digitalRead(BUTTON_NEXT_PIN);
+    bool rawPrev = digitalRead(BUTTON_PREV_PIN);
+
+    // --- SELECT BUTTON ---
+    if (rawSelect != stableSelectState) {
+      vTaskDelay(pdMS_TO_TICKS(30)); 
+      if (digitalRead(BUTTON_SELECT_PIN) == rawSelect) {
+        stableSelectState = rawSelect;
+        if (stableSelectState == LOW) {
+          if (systemState == STATE_MENU) {
+            resetLyricsFlag = true; 
+            systemState = STATE_PLAYING;
+            isPlaying = true;
+            currentTrackIndex = highlightedIndex;
+            lcd.clear();
+            xQueueOverwrite(changeTrackQueue, &currentTrackIndex);
+          } else {
+            isPlaying = !isPlaying;
+            xQueueOverwrite(playPauseQueue, &isPlaying);
+          }
+          vTaskDelay(pdMS_TO_TICKS(200)); 
+        }
+      }
+    }
+
+    // --- NEXT BUTTON ---
+    if (rawNext != stableNextState) {
+      vTaskDelay(pdMS_TO_TICKS(30)); 
+      if (digitalRead(BUTTON_NEXT_PIN) == rawNext) {
+        stableNextState = rawNext;
+        if (stableNextState == LOW && totalSongs > 0) {
+          if (systemState == STATE_MENU) {
+            highlightedIndex = (highlightedIndex + 1) % totalSongs;
+            updateMenuLCD();
+          }
+          vTaskDelay(pdMS_TO_TICKS(150)); 
+        }
+      }
+    }
+
+    // --- PREV BUTTON ---
+    if (rawPrev != stablePrevState) {
+      vTaskDelay(pdMS_TO_TICKS(30)); 
+      if (digitalRead(BUTTON_PREV_PIN) == rawPrev) {
+        stablePrevState = rawPrev;
+        if (stablePrevState == LOW && totalSongs > 0) {
+          if (systemState == STATE_MENU) {
+            highlightedIndex = (highlightedIndex - 1 + totalSongs) % totalSongs;
+            updateMenuLCD();
+          }
+          vTaskDelay(pdMS_TO_TICKS(150)); 
+        }
+      }
+    }
+
+    // --- FIXED LAGGING: Volume collection runs only once every 10 cycles (approx 250ms) ---
+    adcThrottleCounter++;
+    if (adcThrottleCounter >= 10) {
+      adcThrottleCounter = 0; 
+      
+      uint32_t raw_volume = analogRead(ADC_PIN); 
+      float x = raw_volume / 4095.0f;
+      int32_t mapped_volume = (int32_t)(x * 21.0f);
+      
+      if (abs(mapped_volume - lastVolume) >= 2) {
+        xQueueOverwrite(volumeQueue, &mapped_volume);
+        lastVolume = mapped_volume;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(25)); 
+  }
+}
+
+void lyric_task(void* pvParameters) {
     int currentLine   = -1;
     int lastDrawnLine = -2;
-
     uint32_t   lastAudioSec  = 0;
     TickType_t lastSyncTick  = xTaskGetTickCount();
 
@@ -206,10 +343,27 @@ void lyric_task(void* pvParameters)
     for (;;) {
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
+        if (resetLyricsFlag) {
+            currentLine = -1;
+            lastDrawnLine = -2;
+            lastAudioSec = 0;
+            lastSyncTick = xTaskGetTickCount();
+            lcd.clear();
+            resetLyricsFlag = false; 
+        }
+
+        if (systemState == STATE_MENU) {
+            currentLine = -1;  
+            lastDrawnLine = -2;
+            continue; 
+        }
+
         const TickType_t nowTick   = xTaskGetTickCount();
         const uint32_t   audioSec  = (uint32_t)audio.getAudioCurrentTime();
 
-        if (audioSec != lastAudioSec) {
+        if (!isPlaying) {
+            lastSyncTick = nowTick; 
+        } else if (audioSec != lastAudioSec) {
             lastAudioSec = audioSec;
             lastSyncTick = nowTick;
         }
@@ -217,30 +371,47 @@ void lyric_task(void* pvParameters)
         const uint32_t subMs     = (uint32_t)((nowTick - lastSyncTick) * portTICK_PERIOD_MS);
         const uint32_t currentMs = audioSec * 1000u + subMs;
 
-        int nextLine = currentLine;
+        int nextLine = -1; 
 
-        while (nextLine < (int)lyricCount - 1 &&
-               currentMs + LYRIC_LEAD_MS >= currentLyrics[nextLine + 1].timestampMs)
-        {
-            nextLine++;
+        for (int i = 0; i < lyricCount; i++) {
+            if (currentMs >= currentLyrics[i].timestampMs) {
+                nextLine = i;
+            } else {
+                break; 
+            }
         }
 
-        if (nextLine != lastDrawnLine && nextLine >= 0) {
-            printWrappedToLCD(currentLyrics[nextLine].text.c_str(), 0);
+        if (nextLine != lastDrawnLine) {
+            if (nextLine == -1) {
+                lcd.clear(); 
+            } else {
+                printWrappedToLCD(currentLyrics[nextLine].text.c_str(), 0);
+            }
             lastDrawnLine = nextLine;
         }
-
         currentLine = nextLine;
     }
 }
 
+// ============================================================================
+// AUDIO CALLBACK
+// ============================================================================
+void audio_eof_mp3(const char *info){
+  Serial.printf("Song track execution completed: %s\n", info);
+  systemState = STATE_MENU;
+  isPlaying = false;
+  updateMenuLCD();
+}
+
+// ============================================================================
+// INITIALIZATION SETUP
+// ============================================================================
 void setup() {
   Serial.begin(115200);
   while(!Serial);
 
   Wire.begin(LCD_SDA, LCD_SCL);
   lcd.init();
-  lcd.setCursor(0, 0);
   lcd.backlight();
   lcd.print("System Booting..");
 
@@ -251,27 +422,28 @@ void setup() {
     while(true) vTaskDelay(100);
   }
 
-  const char* lrcFile = "/detroit_rock_city.lrc";
-  const char* mp3File = "/detroit.mp3";
+  scanSDForSongs();
 
-  lcd.clear();
-  lcd.print("Loading Lyrics..");
-  parseLRC(lrcFile);
-
-  // Initialize Audio
-  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DIN);
-  audio.setVolume(2);
-  audio.connecttoFS(SD, mp3File); 
+  if (totalSongs == 0) {
+    lcd.clear();
+    lcd.print("No MP3 files found!");
+    while(true) vTaskDelay(100);
+  }
 
   playPauseQueue = xQueueCreate(1, sizeof(bool));
-  volumeQueue = xQueueCreate(1, sizeof(int));
+  volumeQueue    = xQueueCreate(1, sizeof(int));
+  changeTrackQueue = xQueueCreate(1, sizeof(int));
 
-  // Launch tasks
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DIN);
+  audio.setVolume(5);
+
   xTaskCreatePinnedToCore(audio_task, "Audio", 8192, NULL, 3, NULL, 0); 
-  xTaskCreatePinnedToCore(ui_task, "UI", 4096, NULL, 2, NULL, 1);       
+  xTaskCreatePinnedToCore(ui_task,    "UI",    4096, NULL, 2, NULL, 1);       
   xTaskCreatePinnedToCore(lyric_task, "Lyrics", 4096, NULL, 1, NULL, 1); 
 
   vTaskDelete(NULL); 
 }
 
-void loop() { }
+void loop() {
+  // Empty
+}
