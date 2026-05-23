@@ -27,6 +27,9 @@
 #define BUTTON_UP 14
 #define BUTTON_DOWN 15
 
+#define LYRIC_LEAD_MS   650u   // lyric appears this many ms before it is sung
+
+
 extern Audio audio;
 extern LiquidCrystal_I2C lcd;
 
