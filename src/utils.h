@@ -25,7 +25,7 @@
 
 #define BUTTON_SELECT_PIN 27
 #define BUTTON_NEXT_PIN 14
-#define BUTTON_PREV_PIN 15
+#define BUTTON_PREV_PIN 13
 
 #define LYRIC_LEAD_MS   650u   // lyric appears this many ms before it is sung
 
