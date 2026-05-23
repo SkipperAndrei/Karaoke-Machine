@@ -110,40 +110,35 @@ void audio_task(void *pvParameters) {
   }
 }
 
+
+
 void ui_task(void *pvParameters) {
   pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
   
-  bool lastButtonState = HIGH;
-  uint32_t lastDebounceTime = 0;
-  const uint32_t debounceDelay = 50; 
-  
+  bool stableButtonState = HIGH;
   int lastVolume = -1;
-  bool currentButtonState;
-  uint32_t raw_volume;
-  float x;
-  int32_t mapped_volume;
-
 
   for (;;) {
-    currentButtonState = digitalRead(BUTTON_SELECT_PIN);
+    bool rawButtonState = digitalRead(BUTTON_SELECT_PIN);
     
-    if (currentButtonState != lastButtonState) {
-      lastDebounceTime = millis();
-    }
-
-    if ((millis() - lastDebounceTime) > debounceDelay) {
-      if (currentButtonState == LOW && isPlaying != !currentButtonState) {
-        isPlaying = !isPlaying;
-        xQueueOverwrite(playPauseQueue, &isPlaying);
+    if (rawButtonState != stableButtonState) {
+      vTaskDelay(pdMS_TO_TICKS(50)); 
+      
+      if (digitalRead(BUTTON_SELECT_PIN) == rawButtonState) {
+        stableButtonState = rawButtonState;
+        
+        if (stableButtonState == LOW) {
+          isPlaying = !isPlaying;
+          xQueueOverwrite(playPauseQueue, &isPlaying);
+        }
       }
     }
-    lastButtonState = currentButtonState;
 
-    raw_volume = analogRead(ADC_PIN); 
-    x = raw_volume / 4095.0;
-    mapped_volume = x * 21.0f;
+    uint32_t raw_volume = analogRead(ADC_PIN); 
+    float x = raw_volume / 4095.0f;
+    int32_t mapped_volume = (int32_t)(x * 21.0f);
     
-    if (abs(mapped_volume - lastVolume) > 2) {
+    if (abs(mapped_volume - lastVolume) >= 2) {
       xQueueOverwrite(volumeQueue, &mapped_volume);
       lastVolume = mapped_volume;
     }
