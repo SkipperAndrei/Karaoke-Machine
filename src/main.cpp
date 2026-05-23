@@ -6,7 +6,7 @@ enum PlayerState {
 };
 
 volatile PlayerState system_state = STATE_MENU; 
-bool is_playing = false; 
+volatile bool is_playing = false; 
 
 Audio audio;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
