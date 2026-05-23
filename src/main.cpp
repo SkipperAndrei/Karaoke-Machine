@@ -10,6 +10,9 @@ bool is_playing = false;
 
 Audio audio;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
+const int COLS = 20;
+const int ROWS = 4;
+
 
 QueueHandle_t play_pause_queue;
 QueueHandle_t volume_queue;
@@ -151,9 +154,6 @@ void update_menu_lcd() {
 }
 
 void print_wrapped_to_lcd(const char* text, int start_row) {
-    static const int COLS = 20;
-    static const int ROWS = 4;
-
     char buf[COLS + 1];
     const char* p = text;
     int len = 0;
@@ -324,11 +324,11 @@ void ui_task(void *pvParameters) {
 void lyric_task(void* pvParameters) {
     int current_line   = -1;
     int last_drawn_line = -2;
-    uint32_t   last_audio_sec  = 0;
+    uint32_t last_audio_sec  = 0;
     TickType_t last_sync_tick  = xTaskGetTickCount();
 
-    TickType_t       x_last_wake_time = xTaskGetTickCount();
-    const TickType_t x_period       = pdMS_TO_TICKS(50);
+    TickType_t x_last_wake_time = xTaskGetTickCount();
+    const TickType_t x_period = pdMS_TO_TICKS(50);
 
     int next_line = -1;
     for (;;) {
@@ -350,7 +350,7 @@ void lyric_task(void* pvParameters) {
         }
 
         const TickType_t now_tick   = xTaskGetTickCount();
-        const uint32_t   audio_sec  = (uint32_t)audio.getAudioCurrentTime();
+        const uint32_t audio_sec  = (uint32_t)audio.getAudioCurrentTime();
 
         if (!is_playing) {
             last_sync_tick = now_tick; 
@@ -359,7 +359,7 @@ void lyric_task(void* pvParameters) {
             last_sync_tick = now_tick;
         }
 
-        const uint32_t sub_ms     = (uint32_t)((now_tick - last_sync_tick) * portTICK_PERIOD_MS);
+        const uint32_t sub_ms = (uint32_t)((now_tick - last_sync_tick) * portTICK_PERIOD_MS);
         const uint32_t current_ms = audio_sec * 1000u + sub_ms;
 
         next_line = -1; 
