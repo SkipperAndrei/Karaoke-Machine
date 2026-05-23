@@ -1,8 +1,6 @@
 #include "utils.h"
 
-// ============================================================================
-// SYSTEM DEFINITIONS & STATES
-// ============================================================================
+
 enum PlayerState {
   STATE_MENU,
   STATE_PLAYING
@@ -11,7 +9,6 @@ enum PlayerState {
 volatile PlayerState systemState = STATE_MENU; 
 bool isPlaying = false; 
 
-// Core Hardware Interfaces
 Audio audio;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
@@ -20,12 +17,8 @@ QueueHandle_t playPauseQueue;
 QueueHandle_t volumeQueue;
 QueueHandle_t changeTrackQueue;
 
-// Global tracking variables for resetting the lyric engine across threads
 volatile bool resetLyricsFlag = false;
 
-// ============================================================================
-// TRACK & LYRIC LOGISTICS STORAGE
-// ============================================================================
 #define MAX_SONGS 30
 String songList[MAX_SONGS];
 int totalSongs = 0;
@@ -43,9 +36,6 @@ int lyricCount = 0;
 
 void updateMenuLCD();
 
-// ============================================================================
-// DYNAMIC FILE PARSERS & SCANNERS
-// ============================================================================
 void scanSDForSongs() {
   File root = SD.open("/");
   totalSongs = 0;
@@ -139,9 +129,6 @@ void parseLRC(const char* path) {
     Serial.printf("LRC Parser: Loaded %d lines, offset %d ms.\n", lyricCount, offsetMs);
 }
 
-// ============================================================================
-// LCD MENU ENGINE
-// ============================================================================
 void updateMenuLCD() {
   lcd.clear();
   int startRow = (highlightedIndex / 4) * 4; 
@@ -204,9 +191,6 @@ void printWrappedToLCD(const char* text, int startRow) {
     }
 }
 
-// ============================================================================
-// FREERTOS KERNEL TASKS
-// ============================================================================
 void audio_task(void *pvParameters) {
   bool shouldPlay = false;
   int targetVolume = 5;
@@ -241,7 +225,6 @@ void audio_task(void *pvParameters) {
 }
 
 void ui_task(void *pvParameters) {
-  // Pin assignments from utils.h are safely read here
   pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
   pinMode(BUTTON_NEXT_PIN, INPUT_PULLUP);
   pinMode(BUTTON_PREV_PIN, INPUT_PULLUP);
@@ -251,7 +234,7 @@ void ui_task(void *pvParameters) {
   bool stablePrevState = HIGH;
   int lastVolume = -1;
   
-  uint32_t adcThrottleCounter = 0; // Fixed: Throttles down the performance-heavy analogRead loops
+  uint32_t adcThrottleCounter = 0;
 
   updateMenuLCD();
 
@@ -260,7 +243,6 @@ void ui_task(void *pvParameters) {
     bool rawNext = digitalRead(BUTTON_NEXT_PIN);
     bool rawPrev = digitalRead(BUTTON_PREV_PIN);
 
-    // --- SELECT BUTTON ---
     if (rawSelect != stableSelectState) {
       vTaskDelay(pdMS_TO_TICKS(30)); 
       if (digitalRead(BUTTON_SELECT_PIN) == rawSelect) {
@@ -282,7 +264,6 @@ void ui_task(void *pvParameters) {
       }
     }
 
-    // --- NEXT BUTTON ---
     if (rawNext != stableNextState) {
       vTaskDelay(pdMS_TO_TICKS(30)); 
       if (digitalRead(BUTTON_NEXT_PIN) == rawNext) {
@@ -297,7 +278,6 @@ void ui_task(void *pvParameters) {
       }
     }
 
-    // --- PREV BUTTON ---
     if (rawPrev != stablePrevState) {
       vTaskDelay(pdMS_TO_TICKS(30)); 
       if (digitalRead(BUTTON_PREV_PIN) == rawPrev) {
@@ -312,7 +292,6 @@ void ui_task(void *pvParameters) {
       }
     }
 
-    // --- FIXED LAGGING: Volume collection runs only once every 10 cycles (approx 250ms) ---
     adcThrottleCounter++;
     if (adcThrottleCounter >= 10) {
       adcThrottleCounter = 0; 
@@ -393,9 +372,7 @@ void lyric_task(void* pvParameters) {
     }
 }
 
-// ============================================================================
-// AUDIO CALLBACK
-// ============================================================================
+
 void audio_eof_mp3(const char *info){
   Serial.printf("Song track execution completed: %s\n", info);
   systemState = STATE_MENU;
@@ -437,9 +414,9 @@ void setup() {
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DIN);
   audio.setVolume(5);
 
-  xTaskCreatePinnedToCore(audio_task, "Audio", 8192, NULL, 3, NULL, 0); 
-  xTaskCreatePinnedToCore(ui_task,    "UI",    4096, NULL, 2, NULL, 1);       
-  xTaskCreatePinnedToCore(lyric_task, "Lyrics", 4096, NULL, 1, NULL, 1); 
+  xTaskCreatePinnedToCore(audio_task, "Audio", 8192, NULL, 3, NULL, 1); 
+  xTaskCreatePinnedToCore(ui_task,    "UI",    4096, NULL, 2, NULL, 0);       
+  xTaskCreatePinnedToCore(lyric_task, "Lyrics", 4096, NULL, 1, NULL, 0); 
 
   vTaskDelete(NULL); 
 }
