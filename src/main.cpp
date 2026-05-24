@@ -1,4 +1,6 @@
 #include "utils.h"
+#include <string.h>
+#include <ctype.h>
 
 enum PlayerState {
   STATE_MENU,
@@ -13,7 +15,6 @@ LiquidCrystal_I2C lcd(0x27, 20, 4);
 const int COLS = 20;
 const int ROWS = 4;
 
-
 QueueHandle_t play_pause_queue;
 QueueHandle_t volume_queue;
 QueueHandle_t change_track_queue;
@@ -21,21 +22,30 @@ QueueHandle_t change_track_queue;
 volatile bool reset_lyrics_flag = false;
 
 #define MAX_SONGS 30
-String song_list[MAX_SONGS];
+#define MAX_FILENAME_LEN 64
+char song_list[MAX_SONGS][MAX_FILENAME_LEN];
 int total_songs = 0;
 int highlighted_index = 0;   
 int current_track_index = 0;  
 
 #define MAX_LYRICS 250
+#define MAX_LYRIC_TEXT_LEN 80
 struct LyricLine {
   uint32_t timestamp_ms;
-  String text;
+  char text[MAX_LYRIC_TEXT_LEN];
 };
 
 LyricLine current_lyrics[MAX_LYRICS];
 int lyric_count = 0;
 
 void update_menu_lcd();
+
+bool has_mp3_extension(const char* filename) {
+  size_t len = strlen(filename);
+  if (len < 4) return false;
+  const char* ext = filename + len - 4;
+  return (strcasecmp(ext, ".mp3") == 0);
+}
 
 void scan_sd_for_songs() {
   File root = SD.open("/");
@@ -49,9 +59,10 @@ void scan_sd_for_songs() {
   File file = root.openNextFile();
   while (file && total_songs < MAX_SONGS) {
     if (!file.isDirectory()) {
-      String file_name = String(file.name());
-      if (file_name.endsWith(".mp3") || file_name.endsWith(".MP3")) {
-        song_list[total_songs] = file_name;
+      const char* file_name = file.name();
+      if (has_mp3_extension(file_name)) {
+        strncpy(song_list[total_songs], file_name, MAX_FILENAME_LEN - 1);
+        song_list[total_songs][MAX_FILENAME_LEN - 1] = '\0';
         total_songs++;
       }
     }
@@ -61,63 +72,101 @@ void scan_sd_for_songs() {
   Serial.printf("SD Scanner: Automatically loaded %d MP3 files.\n", total_songs);
 }
 
+bool read_line_from_file(File &file, char* buffer, size_t max_len) {
+  if (!file.available()) return false;
+  
+  size_t index = 0;
+  while (file.available() && index < (max_len - 1)) {
+    int c = file.read();
+    if (c < 0) 
+      break;
+    if (c == '\r') 
+      continue;
+    if (c == '\n') 
+      break;
+    buffer[index++] = (char)c;
+  }
+  buffer[index] = '\0';
+  return true;
+}
+
+void trim_c_str(char* str) {
+  size_t len = strlen(str);
+  while (len > 0 && isspace((unsigned char)str[len - 1])) {
+    str[--len] = '\0';
+  }
+  size_t start = 0;
+  while (str[start] && isspace((unsigned char)str[start])) {
+    start++;
+  }
+  if (start > 0) {
+    memmove(str, str + start, len - start + 1);
+  }
+}
+
 void parse_lrc(const char* path) {
     lyric_count = 0;
     int32_t offset_ms = 0;
+    char line[128];
 
     File file = SD.open(path);
     if (!file) {
         Serial.println("LRC file not found!");
-        for(int i = 0; i < MAX_LYRICS; i++) 
-          current_lyrics[i] = {0, ""};
+        for(int i = 0; i < MAX_LYRICS; i++) {
+          current_lyrics[i].timestamp_ms = 0;
+          current_lyrics[i].text[0] = '\0';
+        }
         return;
     }
 
     while (file.available() && lyric_count < MAX_LYRICS) {
-        String line = file.readStringUntil('\n');
-        line.trim();
+        if (!read_line_from_file(file, line, sizeof(line))) continue;
+        trim_c_str(line);
 
-        if (!line.startsWith("[")) continue;
+        if (line[0] != '[') 
+          continue;
 
-        if (line.startsWith("[offset:")) {
-            int close = line.indexOf(']');
-            if (close != -1)
-                offset_ms = line.substring(8, close).toInt();
+        if (strncmp(line, "[offset:", 8) == 0) {
+            char* close = strchr(line, ']');
+            if (close != NULL) {
+                offset_ms = atoi(line + 8);
+            }
             continue;
         }
 
-        if (!isDigit(line.charAt(1))) 
+        if (!isdigit((unsigned char)line[1])) 
           continue;
 
-        int close_bracket = line.indexOf(']');
-        if (close_bracket == -1) 
+        char* close_bracket = strchr(line, ']');
+        if (close_bracket == NULL) 
           continue;
 
-        String time_str = line.substring(1, close_bracket);
-        int colon = time_str.indexOf(':');
-        if (colon == -1) 
+        char* colon = strchr(line + 1, ':');
+        if (colon == NULL || colon > close_bracket) 
           continue;
 
-        int dot = time_str.indexOf('.');
+        char* dot = strchr(line + 1, '.');
+        if (dot > close_bracket) dot = NULL;
 
-        uint32_t mins = time_str.substring(0, colon).toInt();
-        uint32_t secs = (dot != -1)
-                        ? time_str.substring(colon + 1, dot).toInt()
-                        : time_str.substring(colon + 1).toInt();
+        uint32_t mins = atoi(line + 1);
+        uint32_t secs = atoi(colon + 1);
         uint32_t ms = 0;
 
-        if (dot != -1) {
-            String ms_str = time_str.substring(dot + 1);
-            ms = ms_str.toInt();
-            if (ms_str.length() == 1) 
+        if (dot != NULL) {
+            ms = atoi(dot + 1);
+            size_t ms_digit_len = close_bracket - (dot + 1);
+            if (ms_digit_len == 1) 
               ms *= 100;
-            else if (ms_str.length() == 2) 
+            else if (ms_digit_len == 2) 
               ms *= 10;
         }
 
         current_lyrics[lyric_count].timestamp_ms = (mins * 60u + secs) * 1000u + ms;
-        current_lyrics[lyric_count].text = line.substring(close_bracket + 1);
-        current_lyrics[lyric_count].text.trim();
+        
+        strncpy(current_lyrics[lyric_count].text, close_bracket + 1, MAX_LYRIC_TEXT_LEN - 1);
+        current_lyrics[lyric_count].text[MAX_LYRIC_TEXT_LEN - 1] = '\0';
+        trim_c_str(current_lyrics[lyric_count].text);
+        
         lyric_count++;
     }
 
@@ -149,7 +198,10 @@ void update_menu_lcd() {
       lcd.print(" ");
     }
     
-    lcd.print(song_list[song_idx].substring(0, 19));
+    char temp_disp[20];
+    strncpy(temp_disp, song_list[song_idx], 19);
+    temp_disp[19] = '\0';
+    lcd.print(temp_disp);
   }
 }
 
@@ -203,16 +255,23 @@ void audio_task(void *pvParameters) {
   bool should_play = false;
   int target_volume = 5;
   int next_track_idx = 0;
+  char path_buf[MAX_FILENAME_LEN + 2];
 
   for (;;) {
     if (xQueueReceive(change_track_queue, &next_track_idx, 0) == pdTRUE) {
       audio.stopSong();
       
-      String new_lrc = "/" + song_list[next_track_idx];
-      new_lrc.replace(".mp3", ".lrc");
-      parse_lrc(new_lrc.c_str());
+      snprintf(path_buf, sizeof(path_buf), "/%s", song_list[next_track_idx]);
       
-      audio.connecttoFS(SD, ("/" + song_list[next_track_idx]).c_str());
+      char* ext = strrchr(path_buf, '.');
+      if (ext != NULL && (strcasecmp(ext, ".mp3") == 0)) {
+         strcpy(ext, ".lrc");
+      }
+      
+      parse_lrc(path_buf);
+      
+      snprintf(path_buf, sizeof(path_buf), "/%s", song_list[next_track_idx]);
+      audio.connecttoFS(SD, path_buf);
       should_play = true;
     }
 
@@ -268,7 +327,7 @@ void ui_task(void *pvParameters) {
             xQueueOverwrite(change_track_queue, &current_track_index);
           } else {
             is_playing = !is_playing;
-            xQueueOverwrite(play_pause_queue, &is_playing);
+            xQueueOverwrite(play_pause_queue, const_cast<bool*>(&is_playing));
           }
           vTaskDelay(pdMS_TO_TICKS(200)); 
         }
@@ -317,7 +376,7 @@ void ui_task(void *pvParameters) {
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(25)); 
+    vTaskDelay(pdMS_TO_TICKS(5)); 
   }
 }
 
@@ -376,14 +435,13 @@ void lyric_task(void* pvParameters) {
             if (next_line == -1) {
                 lcd.clear(); 
             } else {
-                print_wrapped_to_lcd(current_lyrics[next_line].text.c_str(), 0);
+                print_wrapped_to_lcd(current_lyrics[next_line].text, 0);
             }
             last_drawn_line = next_line;
         }
         current_line = next_line;
     }
 }
-
 
 void audio_eof_mp3(const char *info){
   Serial.printf("Song track execution completed: %s\n", info);
@@ -405,7 +463,8 @@ void setup() {
   if (!SD.begin(SD_CS)) {
     lcd.setCursor(0, 1);
     lcd.print("SD Error!");
-    while(true) vTaskDelay(100);
+    while(true) 
+      vTaskDelay(100);
   }
 
   scan_sd_for_songs();
@@ -413,7 +472,8 @@ void setup() {
   if (total_songs == 0) {
     lcd.clear();
     lcd.print("No MP3 files found!");
-    while(true) vTaskDelay(100);
+    while(true) 
+      vTaskDelay(100);
   }
 
   play_pause_queue = xQueueCreate(1, sizeof(bool));
@@ -424,7 +484,7 @@ void setup() {
   audio.setVolume(5);
 
   xTaskCreatePinnedToCore(audio_task, "Audio", 8192, NULL, 3, NULL, 1); 
-  xTaskCreatePinnedToCore(ui_task,    "UI",    4096, NULL, 2, NULL, 0);       
+  xTaskCreatePinnedToCore(ui_task,    "UI",    4096, NULL, 2, NULL, 0);        
   xTaskCreatePinnedToCore(lyric_task, "Lyrics", 4096, NULL, 1, NULL, 0); 
 
   vTaskDelete(NULL); 
