@@ -376,7 +376,7 @@ void ui_task(void *pvParameters) {
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(5)); 
+    vTaskDelay(pdMS_TO_TICKS(10)); 
   }
 }
 
